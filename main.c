@@ -31,6 +31,16 @@ GLuint blurRadius;
 GLuint blurResolution;
 GLuint blurDirection;
 
+//Framebuffers
+GLuint fb1;
+GLuint fb2;
+GLuint fb1Tex;
+GLuint fb2Tex;
+GLuint fbcurrent;
+
+int buffer_width;
+int buffer_height;
+
 const GLchar* vertSource = "varying vec2 vTexCoord;"
     "varying vec4 vColor;"
     "void main(void) {"
@@ -153,14 +163,6 @@ void load_wallpaper_pixels(GdkPixbuf* pixbuf)
 		ab += pixels[i + 2];
 	}
 
-	printf( "Average color test: %i, %i, %i\n", ar / pixelcount, ag / pixelcount, ab / pixelcount ); 
-	char buffer[64];
-	sprintf( buffer, "#%02X%02X%02X", ar/pixelcount, ag/pixelcount, ab/pixelcount );
-
-	//GConfClient* client = gconf_client_get_default();
-	//gconf_client_set_string( client, "/desktop/eric/theme_color", buffer, NULL );
-    g_settings_set_string( gsettings, "primary-color", buffer );
-	
 	glTexImage2D(GL_TEXTURE_2D,0,GL_RGB,width,height,0,GL_RGB,GL_UNSIGNED_BYTE,pixels);
 }
 
@@ -210,6 +212,15 @@ void load_background_texture(const char* path)
 	g_timeout_add( 16, animation_timer, NULL );
 } 
 
+void init_texture( GLuint* tex, int w, int h )
+{
+    glGenTextures( 1, tex );
+    glBindTexture( GL_TEXTURE_2D, *tex );
+    glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0 );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
+}
+
 void configure_event( GtkWidget* widget, GdkEventConfigure *event, gpointer user )
 {
  	gtk_window_set_type_hint( GTK_WINDOW( window ), GDK_WINDOW_TYPE_HINT_DOCK );
@@ -229,6 +240,27 @@ void configure_event( GtkWidget* widget, GdkEventConfigure *event, gpointer user
 
     load_wallpaper_shaders();
 
+	GdkScreen* screen = gdk_screen_get_default();
+	buffer_width = gdk_screen_get_width( screen );
+	buffer_height = gdk_screen_get_height( screen );
+
+    //Load framebuffer stuff
+    glGenFramebuffers( 1, &fb1 );
+    glGenFramebuffers( 1, &fb2 );
+
+    printf( "init textures\n" );
+	glEnable( GL_TEXTURE_2D );
+    init_texture( &fb1Tex, buffer_width, buffer_height );
+    init_texture( &fb2Tex, buffer_width, buffer_height );
+
+    printf( "bind framebuffer textures\n" );
+    glBindFramebuffer( GL_FRAMEBUFFER, fb1 );
+    glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fb1Tex, 0 );
+    glBindFramebuffer( GL_FRAMEBUFFER, fb2 );
+    glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fb2Tex, 0 );
+
+    glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+
 
 	if( !isConfigured )
 	{
@@ -245,6 +277,29 @@ void configure_event( GtkWidget* widget, GdkEventConfigure *event, gpointer user
 	gdk_gl_drawable_gl_end( gl_drawable );
 };
 
+void swap_buffers()
+{
+    if( fbcurrent == fb1 )
+    {
+        glBindFramebuffer( GL_FRAMEBUFFER, fb2 ); 
+        fbcurrent = fb2;
+
+        glActiveTexture( GL_TEXTURE0 );
+        glBindTexture( GL_TEXTURE_2D, fb1Tex );
+        glUniform1i( tex1Map, 0 );
+    }
+    else
+    {
+        glBindFramebuffer( GL_FRAMEBUFFER, fb1 ); 
+        fbcurrent = fb1;
+
+        glActiveTexture( GL_TEXTURE0 );
+        glBindTexture( GL_TEXTURE_2D, fb2Tex );
+        glUniform1i( tex1Map, 0 );
+    }
+    //glViewport( 0, 0, buffer_width, buffer_height );
+}
+
 void render_gl()
 {
 	GdkGLContext* gl_context = gtk_widget_get_gl_context( drawing_area );
@@ -259,38 +314,87 @@ void render_gl()
     glUseProgram( shaderProgram );
 	glEnable(GL_TEXTURE_2D);
 
+    fbcurrent = fb1;
+
+    glUniform1f( blurRadius, 5.0 * transition_alpha );
+    glUniform1f( blurResolution, 1920.0 );
+
+
+    int i;
+    int blur_passes = (int)(5.0 * transition_alpha);
+    if( blur_passes < 1 ) blur_passes = 1;
+
+    swap_buffers();
     //Bind Textures to shader
     glActiveTexture( GL_TEXTURE0 );
     glBindTexture( GL_TEXTURE_2D, texture );
     glUniform1i( tex1Map, 0 );
-    glActiveTexture( GL_TEXTURE1 );
-    glBindTexture( GL_TEXTURE_2D, texture2 );
-    glUniform1i( tex2Map, 1 );
 
-    glUniform1f( transitionAlpha, transition_alpha );
-    glUniform1f( blurRadius, 5.0 * transition_alpha );
-    glUniform1f( blurResolution, 1920.0 );
-    glUniform2f( blurDirection, 1.0, 0.0 ); //horizontal
+    for( i = 0; i < blur_passes; i++ )
+    {
+        glUniform2f( blurDirection, 1.0, 0.0 ); //horizontal
+        glBegin(GL_QUADS);
+        glColor3f(1.0,1.0,1.0);
+        
+        glTexCoord2f(0,0);
+        glVertex2f(-1,1);
+        
+        glTexCoord2f(1,0);
+        glVertex2f(1,1);
+        
+        glTexCoord2f(1,1);
+        glVertex2f(1,-1);
+        
+        glTexCoord2f(0,1);
+        glVertex2f(-1,-1);        
+        glEnd();                 
 
-    
-    glLoadIdentity();                                  
+        //Vertical pass
+        swap_buffers();
+
+        glUniform2f( blurDirection, 0.0, 1.0 );
+        glBegin(GL_QUADS);
+        glColor3f(1.0,1.0,1.0);
+        
+        glTexCoord2f(0,0);
+        glVertex2f(-1,1);
+        
+        glTexCoord2f(1,0);
+        glVertex2f(1,1);
+        
+        glTexCoord2f(1,1);
+        glVertex2f(1,-1);
+        
+        glTexCoord2f(0,1);
+        glVertex2f(-1,-1);        
+        glEnd();                 
+
+        swap_buffers();
+    }
+
+    //Final pass
+    glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+    glUniform1f( blurRadius, 0.0 );
+    //glViewport( 0, 0, buffer_width, buffer_height );
+    //glLoadIdentity();                                  
     glBegin(GL_QUADS);
-    glColor3f(1.0,1.0,1.0);
-    
+    //glColor3f(1.0,1.0,1.0);
+
     glTexCoord2f(0,0);
     glVertex2f(-1,1);
-    
+
     glTexCoord2f(1,0);
     glVertex2f(1,1);
-    
+
     glTexCoord2f(1,1);
     glVertex2f(1,-1);
-    
+
     glTexCoord2f(0,1);
     glVertex2f(-1,-1);        
     glEnd();                 
 
-    transition_alpha += 0.005f;  
+
+    transition_alpha += 0.05f;  
 
 	if( gdk_gl_drawable_is_double_buffered( gl_drawable ) )
 		gdk_gl_drawable_swap_buffers( gl_drawable );
