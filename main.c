@@ -2,8 +2,10 @@
 
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
+#include <gdk/gdkx.h>
 #include <gtk/gtkgl.h>
 #include <gio/gio.h>
+#include <X11/Xlib.h>
 
 #include <gdk/gdkkeysyms.h>
 
@@ -54,9 +56,9 @@ const GLchar* fragSource = "varying vec4 vColor;"
     "varying vec2 vTexCoord;"
      //declare uniforms"
     "uniform sampler2D tex1Map;"
-    "uniform sampler2D tex2Map;"
     "uniform float resolution;"
     "uniform float radius;"
+    "uniform float transition;"
     "uniform vec2 dir;"
     "void main() {"
          //this will be our RGBA sum
@@ -66,7 +68,7 @@ const GLchar* fragSource = "varying vec4 vColor;"
          //the amount to blur, i.e. how far off center to sample from 
          //1.0 -> blur by one pixel
          //2.0 -> blur by two pixels, etc.
-    "    float blur = radius/resolution; "
+    "    float blur = (radius/7.0)*(1.0/resolution);"
          //the direction of our blur
          //(1.0, 0.0) -> x-axis blur
          //(0.0, 1.0) -> y-axis blur
@@ -83,10 +85,12 @@ const GLchar* fragSource = "varying vec4 vColor;"
     "    sum += texture2D(tex1Map, vec2(tc.x + 3.0*blur*hstep, tc.y + 3.0*blur*vstep)) * 0.0540540541;"
     "    sum += texture2D(tex1Map, vec2(tc.x + 4.0*blur*hstep, tc.y + 4.0*blur*vstep)) * 0.0162162162;"
         //discard alpha for our simple demo, multiply by vertex color and return
-    "   gl_FragColor = vColor * vec4(sum.rgb, 1.0);"
+    "   gl_FragColor = vec4(sum.rgb, 1.0) * (1.0 - (transition * 0.25));"
+    "   gl_FragColor.a = 1.0;"
     "}";
 
 void render_gl();
+void grab_keys();
 
 void load_wallpaper_shaders()
 {
@@ -123,6 +127,7 @@ void load_wallpaper_shaders()
     blurRadius = glGetUniformLocation( shaderProgram, "radius" );
     blurResolution = glGetUniformLocation( shaderProgram, "resolution" );
     blurDirection = glGetUniformLocation( shaderProgram, "dir" );
+    transitionAlpha = glGetUniformLocation( shaderProgram, "transition" );
 }
 
 void load_wallpaper_pixels(GdkPixbuf* pixbuf)
@@ -223,9 +228,8 @@ void init_texture( GLuint* tex, int w, int h )
 
 void configure_event( GtkWidget* widget, GdkEventConfigure *event, gpointer user )
 {
- 	gtk_window_set_type_hint( GTK_WINDOW( window ), GDK_WINDOW_TYPE_HINT_DOCK );
-    gtk_widget_grab_focus( window );
-	
+    //grab_keys();
+
 	GdkGLContext* gl_context = gtk_widget_get_gl_context( widget );
 	GdkGLDrawable *gl_drawable = gtk_widget_get_gl_drawable( widget );
 
@@ -316,13 +320,13 @@ void render_gl()
 
     fbcurrent = fb1;
 
-    glUniform1f( blurRadius, 5.0 * transition_alpha );
-    glUniform1f( blurResolution, 1920.0 );
+    glUniform1f( blurRadius, 150.0 * transition_alpha );
+    glUniform1f( transitionAlpha, 0.0 );
 
 
     int i;
-    int blur_passes = (int)(5.0 * transition_alpha);
-    if( blur_passes < 1 ) blur_passes = 1;
+    int blur_passes = (int)( (150.0 * transition_alpha)/28.0 );
+    blur_passes += 1;
 
     swap_buffers();
     //Bind Textures to shader
@@ -330,9 +334,10 @@ void render_gl()
     glBindTexture( GL_TEXTURE_2D, texture );
     glUniform1i( tex1Map, 0 );
 
-    for( i = 0; i < blur_passes; i++ )
+    for( i = 0; i <= blur_passes; i++ )
     {
-        glUniform2f( blurDirection, 1.0, 0.0 ); //horizontal
+        glUniform1f( blurResolution, (float)buffer_width );
+        glUniform2f( blurDirection, 1.0/(double)(i+1), 0.0 ); //horizontal
         glBegin(GL_QUADS);
         glColor3f(1.0,1.0,1.0);
         
@@ -352,7 +357,8 @@ void render_gl()
         //Vertical pass
         swap_buffers();
 
-        glUniform2f( blurDirection, 0.0, 1.0 );
+        glUniform1f( blurResolution, (float)buffer_height );
+        glUniform2f( blurDirection, 0.0, 1.0/(double)(i+1) );
         glBegin(GL_QUADS);
         glColor3f(1.0,1.0,1.0);
         
@@ -375,6 +381,7 @@ void render_gl()
     //Final pass
     glBindFramebuffer( GL_FRAMEBUFFER, 0 );
     glUniform1f( blurRadius, 0.0 );
+    glUniform1f( transitionAlpha, transition_alpha );
     //glViewport( 0, 0, buffer_width, buffer_height );
     //glLoadIdentity();                                  
     glBegin(GL_QUADS);
@@ -394,7 +401,7 @@ void render_gl()
     glEnd();                 
 
 
-    transition_alpha += 0.05f;  
+    transition_alpha += 0.016f;  
 
 	if( gdk_gl_drawable_is_double_buffered( gl_drawable ) )
 		gdk_gl_drawable_swap_buffers( gl_drawable );
@@ -428,13 +435,6 @@ void init_gl( int argc, char* argv[] )
 	g_signal_connect( drawing_area, "configure-event", G_CALLBACK( configure_event ), NULL );
 };
 
-//void gconf_wallpaper_changed( GConfClient* client, guint cnxn_id, GConfEntry *entry, gpointer user_data )
-//{
-//	printf( "Got change event %s\n", gconf_entry_get_key( entry ) );
-//	if( strcmp( gconf_entry_get_key( entry ), "/desktop/eric/wallpaper_path" ) == 0 )
-//		load_background_texture( gconf_value_get_string( gconf_entry_get_value( entry ) ) );	
-//} 
-
 void gsettings_value_changed( GSettings *settings, const gchar *key, gpointer user )
 {
     if( strcmp( key, "picture-uri" ) == 0 )
@@ -452,13 +452,11 @@ gboolean button_press_event( GtkWidget* widget, GdkEventButton* event, gpointer 
 		sprintf( cmd, "ericlaunch -w -p %i %i -d 480 360 -s 64", (int)event->x, (int)event->y );
 		system( cmd );
 	}
-	//Double click to show desktop hack
-	if( event->type == GDK_2BUTTON_PRESS )
-		system( "xdotool key alt+d" );
 }
 
 gboolean key_press_event( GtkWidget* widget, GdkEventKey* event, gpointer user )
 {
+    printf( "key press event\n" );
     if( event->keyval == GDK_KEY_Escape )
     {
         gtk_main_quit();
@@ -473,7 +471,46 @@ gboolean screen_changed_event( GtkWidget* widget, GdkScreen *old_screen, gpointe
 
 	gtk_window_move( GTK_WINDOW( window ), 0, 0 );
 	gtk_window_resize( GTK_WINDOW( window ), screen_width, screen_height );
- 	gtk_window_set_type_hint( GTK_WINDOW( window ), GDK_WINDOW_TYPE_HINT_DOCK );
+}
+
+GdkFilterReturn handle_x11_event( GdkXEvent *xevent, GdkEvent *event, gpointer data )
+{
+    XEvent* xev = (XEvent*)xevent;
+
+    Display* dpy = GDK_DISPLAY_XDISPLAY( gdk_display_get_default() );
+
+    if( xev->type == KeyPress )
+    {
+        printf( "Got a key press event!\n" );
+        if( xev->xkey.keycode == 133 || xev->xkey.keycode == 134 )
+        {
+            gtk_main_quit();
+        }
+    }
+    if( xev->type == KeyRelease )
+    {
+    }
+
+    return GDK_FILTER_CONTINUE;
+}
+
+void grab_keys()
+{
+    int i;
+    Display* dpy = GDK_DISPLAY_XDISPLAY( gdk_display_get_default() );
+    Window xwin = GDK_WINDOW_XID( gtk_widget_get_window( window ) );
+
+    //Grab number keys 
+    //for( i = 10; i <= 20; i++ )
+    //{
+    //    XGrabKey( dpy, i, Mod4Mask | Mod2Mask, xwin, True, GrabModeAsync, GrabModeAsync );
+    //    XGrabKey( dpy, i, Mod4Mask, xwin, True, GrabModeAsync, GrabModeAsync );
+    //}
+    //XGrabKey( dpy, AnyKey, AnyModifier, xwin, True, GrabModeSync, GrabModeSync );
+    //XGrabKey( dpy, AnyKey, AnyModifier, xwin, True, GrabModeSync, GrabModeSync );
+    XGrabKeyboard( dpy, xwin, False, GrabModeSync, GrabModeSync, CurrentTime );
+
+    gdk_window_add_filter( NULL, handle_x11_event, NULL );
 }
 
 int main( int argc, char* argv[] )
@@ -486,10 +523,12 @@ int main( int argc, char* argv[] )
 	
 	window = gtk_window_new( GTK_WINDOW_TOPLEVEL );
  	gtk_window_set_type_hint( GTK_WINDOW( window ), GDK_WINDOW_TYPE_HINT_DOCK );
-	gtk_window_resize( GTK_WINDOW( window ), screen_width, screen_height );
+	gtk_widget_set_size_request( window, screen_width, screen_height );
 	gtk_window_move( GTK_WINDOW( window ), 0, 0 );
 	gtk_window_fullscreen( GTK_WINDOW( window ) ); 
+	gtk_window_set_decorated( GTK_WINDOW( window ), FALSE ); 
 	gtk_window_set_keep_above( GTK_WINDOW( window ), TRUE ); 
+    gtk_widget_set_can_focus( window, TRUE );
 	gtk_widget_add_events( window, GDK_BUTTON_PRESS_MASK | GDK_KEY_PRESS_MASK );
 	g_signal_connect( G_OBJECT(window), "button-press-event", G_CALLBACK(button_press_event), NULL );
 	g_signal_connect( G_OBJECT(window), "key-press-event", G_CALLBACK(key_press_event), NULL );
