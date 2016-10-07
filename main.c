@@ -16,32 +16,42 @@
 #include <stdio.h>
 #include <string.h>
 
-GtkWidget* window;
-GtkWidget* drawing_area;
+typedef struct 
+{
+    GtkWidget* window;
+    GtkWidget* drawing_area;
+    gboolean isConfigured;
+    int width;
+    int height;
+    
+    //Framebuffers
+    GLuint fb1;
+    GLuint fb2;
+    GLuint fb1Tex;
+    GLuint fb2Tex;
+    GLuint fbcurrent;
 
-gboolean isConfigured = FALSE;
+    //Other gl things
+    GLuint shaderProgram;
+    GLuint tex1Map;
+    GLuint tex2Map;
+    GLuint transitionAlpha;
+    GLuint blurRadius;
+    GLuint blurResolution;
+    GLuint blurDirection;
+
+} lock_window;
+
+GdkGLConfig *gl_config;
+
+int mons;
+lock_window lock_windows[8]; //If you have more than 8 displays I'm sorry.
+
 
 float transition_alpha = 0.0f;
 
 GSettings* gsettings;
 
-GLuint shaderProgram;
-GLuint tex1Map;
-GLuint tex2Map;
-GLuint transitionAlpha;
-GLuint blurRadius;
-GLuint blurResolution;
-GLuint blurDirection;
-
-//Framebuffers
-GLuint fb1;
-GLuint fb2;
-GLuint fb1Tex;
-GLuint fb2Tex;
-GLuint fbcurrent;
-
-int buffer_width;
-int buffer_height;
 
 const GLchar* vertSource = "varying vec2 vTexCoord;"
     "varying vec4 vColor;"
@@ -89,10 +99,10 @@ const GLchar* fragSource = "varying vec4 vColor;"
     "   gl_FragColor.a = 1.0;"
     "}";
 
-void render_gl();
+void render_gl( lock_window* w );
 void grab_keys();
 
-void load_wallpaper_shaders()
+void load_wallpaper_shaders( lock_window* w )
 {
     GLuint vertShader, fragShader;
     char buffer[2048];
@@ -112,22 +122,22 @@ void load_wallpaper_shaders()
     glGetShaderInfoLog( fragShader, 2048, NULL, buffer );
     printf( buffer );
 
-    shaderProgram = glCreateProgram();
+    w->shaderProgram = glCreateProgram();
 
-    glAttachShader( shaderProgram, vertShader );
-    glAttachShader( shaderProgram, fragShader );
+    glAttachShader( w->shaderProgram, vertShader );
+    glAttachShader( w->shaderProgram, fragShader );
 
-    glLinkProgram( shaderProgram );
-    glGetProgramInfoLog( shaderProgram, 2048, NULL, buffer );
+    glLinkProgram( w->shaderProgram );
+    glGetProgramInfoLog( w->shaderProgram, 2048, NULL, buffer );
     printf( buffer );
 
-    tex1Map = glGetUniformLocation( shaderProgram, "tex1Map" );
-    tex2Map = glGetUniformLocation( shaderProgram, "tex2Map" );
-    transitionAlpha = glGetUniformLocation( shaderProgram, "transitionAlpha" );
-    blurRadius = glGetUniformLocation( shaderProgram, "radius" );
-    blurResolution = glGetUniformLocation( shaderProgram, "resolution" );
-    blurDirection = glGetUniformLocation( shaderProgram, "dir" );
-    transitionAlpha = glGetUniformLocation( shaderProgram, "transition" );
+    w->tex1Map = glGetUniformLocation( w->shaderProgram, "tex1Map" );
+    w->tex2Map = glGetUniformLocation( w->shaderProgram, "tex2Map" );
+    w->transitionAlpha = glGetUniformLocation( w->shaderProgram, "transitionAlpha" );
+    w->blurRadius = glGetUniformLocation( w->shaderProgram, "radius" );
+    w->blurResolution = glGetUniformLocation( w->shaderProgram, "resolution" );
+    w->blurDirection = glGetUniformLocation( w->shaderProgram, "dir" );
+    w->transitionAlpha = glGetUniformLocation( w->shaderProgram, "transition" );
 }
 
 void load_wallpaper_pixels(GdkPixbuf* pixbuf)
@@ -173,8 +183,11 @@ void load_wallpaper_pixels(GdkPixbuf* pixbuf)
 
 gboolean animation_timer( gpointer user )
 {
-	render_gl();
+    int i;
+    for( i = 0; i < mons; i++ )
+        render_gl( &lock_windows[i]  );
 
+    transition_alpha += 0.016f;  
 	return ( transition_alpha < 1.0 );
 }
 
@@ -229,6 +242,9 @@ void init_texture( GLuint* tex, int w, int h )
 void configure_event( GtkWidget* widget, GdkEventConfigure *event, gpointer user )
 {
     //grab_keys();
+    lock_window* w = (lock_window*)user;
+    if( w->isConfigured == TRUE )
+        return;
 
 	GdkGLContext* gl_context = gtk_widget_get_gl_context( widget );
 	GdkGLDrawable *gl_drawable = gtk_widget_get_gl_drawable( widget );
@@ -242,72 +258,67 @@ void configure_event( GtkWidget* widget, GdkEventConfigure *event, gpointer user
     else
         printf("glew ok!\n");
 
-    load_wallpaper_shaders();
-
-	GdkScreen* screen = gdk_screen_get_default();
-	buffer_width = gdk_screen_get_width( screen );
-	buffer_height = gdk_screen_get_height( screen );
+    load_wallpaper_shaders( w );
 
     //Load framebuffer stuff
-    glGenFramebuffers( 1, &fb1 );
-    glGenFramebuffers( 1, &fb2 );
+    glGenFramebuffers( 1, &w->fb1 );
+    glGenFramebuffers( 1, &w->fb2 );
 
     printf( "init textures\n" );
 	glEnable( GL_TEXTURE_2D );
-    init_texture( &fb1Tex, buffer_width, buffer_height );
-    init_texture( &fb2Tex, buffer_width, buffer_height );
+    init_texture( &w->fb1Tex, w->width, w->height );
+    init_texture( &w->fb2Tex, w->width, w->height );
 
     printf( "bind framebuffer textures\n" );
-    glBindFramebuffer( GL_FRAMEBUFFER, fb1 );
-    glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fb1Tex, 0 );
-    glBindFramebuffer( GL_FRAMEBUFFER, fb2 );
-    glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fb2Tex, 0 );
+    glBindFramebuffer( GL_FRAMEBUFFER, w->fb1 );
+    glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, w->fb1Tex, 0 );
+    glBindFramebuffer( GL_FRAMEBUFFER, w->fb2 );
+    glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, w->fb2Tex, 0 );
 
     glBindFramebuffer( GL_FRAMEBUFFER, 0 );
 
-
-	if( !isConfigured )
-	{
-		isConfigured = TRUE;
-	}
 
 	glEnable( GL_BLEND );
 	glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA );
 
 	//GConfClient* client = gconf_client_get_default();
-    system( "scrot /tmp/ericlock.png" );
-	load_background_texture( "/tmp/ericlock.png" );
+    if( texture == 0 )
+    {
+        system( "scrot /tmp/ericlock.png" );
+        load_background_texture( "/tmp/ericlock.png" );
+    }
 
 	gdk_gl_drawable_gl_end( gl_drawable );
+
+    w->isConfigured = TRUE;
 };
 
-void swap_buffers()
+void swap_buffers( lock_window* w )
 {
-    if( fbcurrent == fb1 )
+    if( w->fbcurrent == w->fb1 )
     {
-        glBindFramebuffer( GL_FRAMEBUFFER, fb2 ); 
-        fbcurrent = fb2;
+        glBindFramebuffer( GL_FRAMEBUFFER, w->fb2 ); 
+        w->fbcurrent = w->fb2;
 
         glActiveTexture( GL_TEXTURE0 );
-        glBindTexture( GL_TEXTURE_2D, fb1Tex );
-        glUniform1i( tex1Map, 0 );
+        glBindTexture( GL_TEXTURE_2D, w->fb1Tex );
+        glUniform1i( w->tex1Map, 0 );
     }
     else
     {
-        glBindFramebuffer( GL_FRAMEBUFFER, fb1 ); 
-        fbcurrent = fb1;
+        glBindFramebuffer( GL_FRAMEBUFFER, w->fb1 ); 
+        w->fbcurrent = w->fb1;
 
         glActiveTexture( GL_TEXTURE0 );
-        glBindTexture( GL_TEXTURE_2D, fb2Tex );
-        glUniform1i( tex1Map, 0 );
+        glBindTexture( GL_TEXTURE_2D, w->fb2Tex );
+        glUniform1i( w->tex1Map, 0 );
     }
-    //glViewport( 0, 0, buffer_width, buffer_height );
 }
 
-void render_gl()
+void render_gl( lock_window* w )
 {
-	GdkGLContext* gl_context = gtk_widget_get_gl_context( drawing_area );
-	GdkGLDrawable *gl_drawable = gtk_widget_get_gl_drawable( drawing_area );
+	GdkGLContext* gl_context = gtk_widget_get_gl_context( w->drawing_area );
+	GdkGLDrawable *gl_drawable = gtk_widget_get_gl_drawable( w->drawing_area );
 
 	if( !gdk_gl_drawable_gl_begin( gl_drawable, gl_context ) )
 		g_assert_not_reached();
@@ -315,29 +326,29 @@ void render_gl()
 	glClearColor( 0.0, 0.0, 0.0, 1.0 );
 	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 
-    glUseProgram( shaderProgram );
+    glUseProgram( w->shaderProgram );
 	glEnable(GL_TEXTURE_2D);
 
-    fbcurrent = fb1;
+    w->fbcurrent = w->fb1;
 
-    glUniform1f( blurRadius, 150.0 * transition_alpha );
-    glUniform1f( transitionAlpha, 0.0 );
+    glUniform1f( w->blurRadius, 150.0 * transition_alpha );
+    glUniform1f( w->transitionAlpha, 0.0 );
 
 
     int i;
     int blur_passes = (int)( (150.0 * transition_alpha)/28.0 );
     blur_passes += 1;
 
-    swap_buffers();
+    swap_buffers( w );
     //Bind Textures to shader
     glActiveTexture( GL_TEXTURE0 );
     glBindTexture( GL_TEXTURE_2D, texture );
-    glUniform1i( tex1Map, 0 );
+    glUniform1i( w->tex1Map, 0 );
 
     for( i = 0; i <= blur_passes; i++ )
     {
-        glUniform1f( blurResolution, (float)buffer_width );
-        glUniform2f( blurDirection, 1.0/(double)(i+1), 0.0 ); //horizontal
+        glUniform1f( w->blurResolution, (float)w->width );
+        glUniform2f( w->blurDirection, 1.0/(double)(i+1), 0.0 ); //horizontal
         glBegin(GL_QUADS);
         glColor3f(1.0,1.0,1.0);
         
@@ -355,10 +366,10 @@ void render_gl()
         glEnd();                 
 
         //Vertical pass
-        swap_buffers();
+        swap_buffers( w );
 
-        glUniform1f( blurResolution, (float)buffer_height );
-        glUniform2f( blurDirection, 0.0, 1.0/(double)(i+1) );
+        glUniform1f( w->blurResolution, (float)w->height );
+        glUniform2f( w->blurDirection, 0.0, 1.0/(double)(i+1) );
         glBegin(GL_QUADS);
         glColor3f(1.0,1.0,1.0);
         
@@ -375,14 +386,13 @@ void render_gl()
         glVertex2f(-1,-1);        
         glEnd();                 
 
-        swap_buffers();
+        swap_buffers( w );
     }
 
     //Final pass
     glBindFramebuffer( GL_FRAMEBUFFER, 0 );
-    glUniform1f( blurRadius, 0.0 );
-    glUniform1f( transitionAlpha, transition_alpha );
-    //glViewport( 0, 0, buffer_width, buffer_height );
+    glUniform1f( w->blurRadius, 0.0 );
+    glUniform1f( w->transitionAlpha, transition_alpha );
     //glLoadIdentity();                                  
     glBegin(GL_QUADS);
     //glColor3f(1.0,1.0,1.0);
@@ -401,7 +411,6 @@ void render_gl()
     glEnd();                 
 
 
-    transition_alpha += 0.016f;  
 
 	if( gdk_gl_drawable_is_double_buffered( gl_drawable ) )
 		gdk_gl_drawable_swap_buffers( gl_drawable );
@@ -413,26 +422,19 @@ void render_gl()
 
 void expose_event( GtkWidget* widget, GdkEventExpose *event, gpointer user )
 {
-	render_gl();
+	render_gl( (lock_window*)user );
 }	
 
 void init_gl( int argc, char* argv[] )
 {
 	gtk_gl_init( &argc, &argv );
 	
-	GdkGLConfig *gl_config = gdk_gl_config_new_by_mode( (GdkGLConfigMode)(GDK_GL_MODE_RGBA,
-								GDK_GL_MODE_DEPTH |
-								GDK_GL_MODE_DOUBLE) );
+	gl_config = gdk_gl_config_new_by_mode( (GdkGLConfigMode)(GDK_GL_MODE_RGBA,
+        GDK_GL_MODE_DEPTH |
+        GDK_GL_MODE_DOUBLE) );
 
 	if( !gl_config )
 		g_assert_not_reached();
-	
-	if( !gtk_widget_set_gl_capability( drawing_area, gl_config, NULL, TRUE, GDK_GL_RGBA_TYPE) )
-		g_assert_not_reached();
-
-
-	g_signal_connect( drawing_area, "expose-event", G_CALLBACK( expose_event ), NULL );
-	g_signal_connect( drawing_area, "configure-event", G_CALLBACK( configure_event ), NULL );
 };
 
 void gsettings_value_changed( GSettings *settings, const gchar *key, gpointer user )
@@ -469,8 +471,8 @@ gboolean screen_changed_event( GtkWidget* widget, GdkScreen *old_screen, gpointe
 	int screen_width = gdk_screen_get_width( screen );
 	int screen_height = gdk_screen_get_height( screen );
 
-	gtk_window_move( GTK_WINDOW( window ), 0, 0 );
-	gtk_window_resize( GTK_WINDOW( window ), screen_width, screen_height );
+	gtk_window_move( GTK_WINDOW( widget ), 0, 0 );
+	gtk_window_resize( GTK_WINDOW( widget ), screen_width, screen_height );
 }
 
 GdkFilterReturn handle_x11_event( GdkXEvent *xevent, GdkEvent *event, gpointer data )
@@ -494,7 +496,7 @@ GdkFilterReturn handle_x11_event( GdkXEvent *xevent, GdkEvent *event, gpointer d
     return GDK_FILTER_CONTINUE;
 }
 
-void grab_keys()
+/*void grab_keys()
 {
     int i;
     Display* dpy = GDK_DISPLAY_XDISPLAY( gdk_display_get_default() );
@@ -511,35 +513,54 @@ void grab_keys()
     XGrabKeyboard( dpy, xwin, False, GrabModeSync, GrabModeSync, CurrentTime );
 
     gdk_window_add_filter( NULL, handle_x11_event, NULL );
+}*/
+
+int create_lock_window( lock_window* w, GdkRectangle* rect )
+{
+	w->window = gtk_window_new( GTK_WINDOW_TOPLEVEL );
+ 	gtk_window_set_type_hint( GTK_WINDOW( w->window ), GDK_WINDOW_TYPE_HINT_NORMAL );
+	gtk_widget_set_size_request( w->window, rect->width, rect->height );
+    w->width = rect->width; w->height = rect->height;
+	gtk_window_move( GTK_WINDOW( w->window ), rect->x, rect->y );
+	gtk_window_fullscreen( GTK_WINDOW( w->window ) ); 
+	gtk_window_set_decorated( GTK_WINDOW( w->window ), FALSE ); 
+	gtk_window_set_keep_above( GTK_WINDOW( w->window ), TRUE ); 
+    gtk_widget_set_can_focus( w->window, TRUE );
+	gtk_widget_add_events( w->window, GDK_BUTTON_PRESS_MASK | GDK_KEY_PRESS_MASK );
+	g_signal_connect( G_OBJECT(w->window), "button-press-event", G_CALLBACK(button_press_event), NULL );
+	g_signal_connect( G_OBJECT(w->window), "key-press-event", G_CALLBACK(key_press_event), NULL );
+	g_signal_connect( G_OBJECT(w->window), "screen-changed", G_CALLBACK(screen_changed_event), NULL );
+	
+
+	w->drawing_area = gtk_drawing_area_new();
+	
+	gtk_container_add( GTK_CONTAINER( w->window ), w->drawing_area );
+    
+    //Opengl stuff
+	if( !gtk_widget_set_gl_capability( w->drawing_area, gl_config, NULL, TRUE, GDK_GL_RGBA_TYPE) )
+		g_assert_not_reached();
+
+	g_signal_connect( w->drawing_area, "expose-event", G_CALLBACK( expose_event ), (gpointer)w );
+    w->isConfigured = FALSE;
+	g_signal_connect( w->drawing_area, "configure-event", G_CALLBACK( configure_event ), (gpointer)w );
+	
 }
 
 int main( int argc, char* argv[] )
 {
 	gtk_init( &argc, &argv );
 
-	GdkScreen* screen = gdk_screen_get_default();
-	int screen_width = gdk_screen_get_width( screen );
-	int screen_height = gdk_screen_get_height( screen );
-	
-	window = gtk_window_new( GTK_WINDOW_TOPLEVEL );
- 	gtk_window_set_type_hint( GTK_WINDOW( window ), GDK_WINDOW_TYPE_HINT_DOCK );
-	gtk_widget_set_size_request( window, screen_width, screen_height );
-	gtk_window_move( GTK_WINDOW( window ), 0, 0 );
-	gtk_window_fullscreen( GTK_WINDOW( window ) ); 
-	gtk_window_set_decorated( GTK_WINDOW( window ), FALSE ); 
-	gtk_window_set_keep_above( GTK_WINDOW( window ), TRUE ); 
-    gtk_widget_set_can_focus( window, TRUE );
-	gtk_widget_add_events( window, GDK_BUTTON_PRESS_MASK | GDK_KEY_PRESS_MASK );
-	g_signal_connect( G_OBJECT(window), "button-press-event", G_CALLBACK(button_press_event), NULL );
-	g_signal_connect( G_OBJECT(window), "key-press-event", G_CALLBACK(key_press_event), NULL );
-	g_signal_connect( G_OBJECT(window), "screen-changed", G_CALLBACK(screen_changed_event), NULL );
-	
-
-	drawing_area = gtk_drawing_area_new();
-	
-	gtk_container_add( GTK_CONTAINER( window ), drawing_area );
-
 	init_gl( argc, argv );
+
+    GdkRectangle mon_geom;
+    int i;
+	GdkScreen* screen = gdk_screen_get_default();
+    mons = gdk_screen_get_n_monitors( screen );
+    for( i = 0; i< mons; i++ )
+    {
+        gdk_screen_get_monitor_geometry( screen, i, &mon_geom );
+        create_lock_window( &lock_windows[i], &mon_geom );
+    }
 
     GSettingsSchema* gsettings_schema;
 
@@ -553,13 +574,14 @@ int main( int argc, char* argv[] )
         gsettings = g_settings_new ( "org.gnome.desktop.background" );
     }
 
-    g_signal_connect_data( gsettings, "changed", G_CALLBACK( gsettings_value_changed ), NULL, 0, 0 );
+    //g_signal_connect_data( gsettings, "changed", G_CALLBACK( gsettings_value_changed ), NULL, 0, 0 );
 
 	//GConfClient* client = gconf_client_get_default();
 	//gconf_client_add_dir( client, "/desktop/eric", GCONF_CLIENT_PRELOAD_ONELEVEL, NULL );
 	//gconf_client_notify_add( client, "/desktop/eric/wallpaper_path", gconf_wallpaper_changed, NULL, NULL, NULL );
 
-	gtk_widget_show_all( window );
+    for( i = 0; i< mons; i++ )
+        gtk_widget_show_all( lock_windows[i].window );
 
 	gtk_main();
 	
