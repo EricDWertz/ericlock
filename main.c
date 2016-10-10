@@ -16,6 +16,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <time.h>
+
 typedef struct 
 {
     GtkWidget* window;
@@ -62,6 +64,9 @@ float transition_direction = 1.0f;
 
 GSettings* gsettings;
 
+long old_ns;
+#define FADEIN_TIME 5.0f
+#define FADEOUT_TIME 0.25f
 
 const GLchar* vertSource = "varying vec2 vTexCoord;"
     "varying vec4 vColor;"
@@ -199,14 +204,23 @@ gboolean animation_timer( gpointer user )
         render_gl( &lock_windows[i]  );
     }
 
+    struct timespec tp;
+    clock_gettime( CLOCK_MONOTONIC, &tp );
+    int nanodiff = tp.tv_nsec - old_ns;
+
+    float dt = (float)nanodiff/1.0e9f;
+    if( dt < 0.0f ) dt += 1.0f;
+
+    old_ns = tp.tv_nsec;
+
     if( transition_direction > 0.0f )
     {
-        transition_alpha += 0.0016f;  
+        transition_alpha += dt / FADEIN_TIME;  
         return ( transition_alpha < 1.0 );
     }
     else
     {
-        transition_alpha -= 0.0128f;  
+        transition_alpha -= dt / FADEOUT_TIME;  
 
         for( i = 0; i < mons; i++ )
             gtk_window_set_opacity( GTK_WINDOW( lock_windows[i].window ), transition_alpha );
@@ -474,6 +488,10 @@ gboolean key_press_event( GtkWidget* widget, GdkEventKey* event, gpointer user )
     if( event->keyval == GDK_KEY_Escape )
     {
         transition_direction = -1.0f;
+
+        struct timespec tp;
+        clock_gettime( CLOCK_MONOTONIC, &tp );
+        old_ns = tp.tv_nsec;
         g_timeout_add( 16, animation_timer, NULL );
     }
 }
@@ -609,6 +627,10 @@ int main( int argc, char* argv[] )
     for( i = 0; i< mons; i++ )
         gtk_widget_show_all( lock_windows[i].window );
 
+    //Kick off the animation timer
+    struct timespec tp;
+    clock_gettime( CLOCK_MONOTONIC, &tp );
+    old_ns = tp.tv_nsec;
 	g_timeout_add( 16, animation_timer, NULL );
 
     grab_keys();
