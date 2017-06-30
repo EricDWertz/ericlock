@@ -196,6 +196,11 @@ void load_wallpaper_pixels(GdkPixbuf* pixbuf)
 	glTexImage2D(GL_TEXTURE_2D,0,GL_RGB,width,height,0,GL_RGB,GL_UNSIGNED_BYTE,pixels);
 }
 
+gboolean suspend_timer( gpointer user )
+{
+    system( "xset dpms force suspend" );
+}
+
 gboolean animation_timer( gpointer user )
 {
     int i;
@@ -560,6 +565,8 @@ int create_lock_window( lock_window* w, GdkRectangle* rect )
 	gtk_window_set_decorated( GTK_WINDOW( w->window ), FALSE ); 
 	//gtk_window_set_keep_above( GTK_WINDOW( w->window ), TRUE ); 
     gtk_widget_set_can_focus( w->window, TRUE );
+    gtk_window_set_skip_taskbar_hint( GTK_WINDOW( w->window ), TRUE );
+    gtk_window_set_skip_pager_hint( GTK_WINDOW( w->window ), TRUE );
 	gtk_widget_add_events( w->window, GDK_BUTTON_PRESS_MASK | GDK_KEY_PRESS_MASK );
 	g_signal_connect( G_OBJECT(w->window), "button-press-event", G_CALLBACK(button_press_event), NULL );
 	g_signal_connect( G_OBJECT(w->window), "key-press-event", G_CALLBACK(key_press_event), NULL );
@@ -632,6 +639,8 @@ int main( int argc, char* argv[] )
     clock_gettime( CLOCK_MONOTONIC, &tp );
     old_ns = tp.tv_nsec;
 	g_timeout_add( 16, animation_timer, NULL );
+
+	g_timeout_add_seconds( 600, suspend_timer, NULL );
 
     grab_keys();
 	gtk_main();
